@@ -1,0 +1,51 @@
+# main（公開版）をサイトのトップに、dev（開発版）を /dev/ に配置して、
+# gh-pages ブランチへ書き出す。GitHub Pages は gh-pages ブランチを表示する。
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          ref: dev
+          path: dev
+
+      - name: Assemble site
+        run: |
+          mkdir -p site
+          rsync -a --exclude .git --exclude .github main/ site/
+          if [ -f dev/index.html ]; then
+            mkdir -p site/dev
+            rsync -a --exclude .git --exclude .github dev/ site/dev/
+          fi
+          touch site/.nojekyll
+          find site -maxdepth 2 -type f | sort
+
+      - name: Publish to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages
+          force_orphan: true

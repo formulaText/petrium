@@ -1331,6 +1331,7 @@ const Sim = (() => {
     gTemp: true, tempRate: 1, tempCool: 15, heatEvap: 0.09, heatSpeed: 0.09, iceStuck: 2, slideMax: 1.8, slideAcc: 0.9, wobbleWall: 1.4, wobbleFloor: 0.7,   // 加温・冷却
     pherFormAt: 4, pherFullAt: 5.5, pherFootHalf: 6,   // フェロモンの足跡：でき始め・完全になる濃さ（隣り合う2マスの合計）・半分に薄れるまでの秒数
     gPher: true, pherDelay: 2, pherWindow: 20, pherArrive: 10, pherPinkStay: 6, pherHot: 28,   // フェロモン（効果20秒・着いたとみなす10秒以内・28度以上で活性化）
+    pherHotRate: 1 / 3, pherMaxLife: 60,   // 活性化中は効果の時間がふだんの1/3の速さで進む・完全になってから60秒たったら温度に関係なく必ず切れる
     gQuantum: true, quantumCost: 100, quantumBits: 25, quantumTime: 20, quantumMiss: 0.5, quantumCalm: 0.2, quantumRetry: 0.5,
     mqTime: 15, mqWipe: 0.1, mqTurn: 3.2,   // ミラクル量子モード（15秒・食べ尽くしたあと1割で回路が広がってすべて消える・曲がりやすさ）
     pbWet: 2, pbChance: 0.7,   // Pベータ（水とフェロモンが2秒重なると7割でまだらのガスに）   // 量子ビット（体内100粒で生み出す・代償25粒・効果20秒・置けなかった1粒ごとに0.5秒短く・ドジやパニックは2割に）
@@ -2986,7 +2987,7 @@ const Sim = (() => {
           for (let yy = 0; yy < WR; yy++) for (let xx = 0; xx < WR; xx++) { const i = (y0 + yy) * WN + x0 + xx; S.wh[i] = 0; for (let d = 0; d < 4; d++) S.wf[i * 4 + d] = 0; }
         }
         if (S.fireT[c] >= 0) { S.fireT[c] = -1; emit(S, { type: 'fireOut', c, by: 'sponge' }); }
-        if (S.pher && S.pher.cells && S.pher.cells.includes(c) && S.pher.state !== 'fade') { S.pher.state = 'fade'; S.pher.fadeT = S.t; emit(S, { type: 'pherEnd' }); }
+        if (S.pher && S.pher.cells && S.pher.cells.includes(c) && S.pher.state !== 'fade') pherFade(S, S.pher);   // 修正：活性化（足踏み）とハンターのうろうろも一緒に終わらせる
         if (S.burnt[c]) { S.burnt[c] = 0; emit(S, { type: 'clean', c }); }
         if (S.ice && S.ice[c]) S.ice[c] = 0;
         B.cleaned++;
@@ -3627,20 +3628,50 @@ const Sim = (() => {
       for (let c = 0; c < N * N; c++) if (f[c] > 0) { f[c] *= k; if (f[c] < 0.02) f[c] = 0; }
       if (S.pher && S.pher.state === 'forming') pherCheck(S);
     }
+    // フェロモンを「切れた」状態にする。活性化とハンターのうろうろも必ず一緒に終わらせる（桃だけは最大 pherPinkStay 秒残る）
+    function pherFade(S, F) {
+      F.state = 'fade'; F.fadeT = S.t;
+      F.active = false;                                                // 修正：活性化のまま fade になると、足踏みとうろうろの延長が続いていた
+      emit(S, { type: 'pherEnd' });
+      for (const g of S.ghosts) {
+        if (g.key === 'pink' && g.pherStay && S.t < g.pherStay) g.pherStay = Math.min(g.pherStay, S.t + P.pherPinkStay);
+        else g.pherStay = 0;                                           // 修正：桃以外は、切れた時点でうろうろをやめる
+        g.pherDone = true; g.pherLoyal = undefined;
+      }
+    }
+    // 保存データから戻したフェロモンに時刻が欠けていたら補う（欠けたままだと比べられず、いつまでも切れない）
+    function pherRepair(S, F) {
+      const ok = v => typeof v === 'number' && isFinite(v);
+      if (F.state === 'full') {
+        if (!ok(F.t0) || F.t0 > S.t) F.t0 = ok(F.ts) && F.ts <= S.t ? F.ts : S.t;
+        if (!ok(F.go)) F.go = F.t0 + P.pherDelay;
+      } else if (F.state === 'fade') {
+        if (!ok(F.fadeT) || F.fadeT > S.t) F.fadeT = S.t;
+        F.active = false;
+      } else if (F.state === 'forming') {
+        if (!ok(F.ts)) F.ts = S.t;
+        footOf(S);                                                     // 足跡の表がないと薄れる処理が動かず、でき始めのまま残る
+      } else { F.state = 'fade'; F.fadeT = S.t; F.active = false; }   // 知らない状態は、消える流れに乗せる
+    }
     function pherTick(S) {
       blastTick(S);
       const F = S.pher;
       if (!F) return;
       if (!F.cells) { S.pher = null; return; }                         // 古い保存データのフェロモン
+      pherRepair(S, F);
       if (F.state === 'full') {
-        // 28〜30度のあいだは活性化：効果の時間が止まり、まわり1マスのハンターはその場で足踏みし続ける
+        // 28〜30度のあいだは活性化：効果の時間がふだんの1/3の速さで進み、まわり1マスのハンターはその場で足踏みし続ける
         const hot = P.gTemp && S.temp && S.temp.T >= P.pherHot;
         if (hot !== !!F.active) { F.active = hot; emit(S, { type: 'pherActive', on: hot }); if (hot) log(S, 'フェロモンが暑さで活性化した', 'warn'); }
-        if (!F.active) F.el = (F.el || 0) + DT; else F.pausedT = (F.pausedT || 0) + DT;
+        // 修正：以前は活性化中に効果の時間が完全に止まり、加温が続くといつまでも切れなかった。止めずに遅く進める
+        const rate = F.active ? P.pherHotRate : 1;
+        F.el = (F.el || 0) + DT * rate;
+        if (F.active) F.pausedT = (F.pausedT || 0) + DT * (1 - rate);   // 遅れた分だけ「着いたとみなす」時間も延ばす（今までの考え方のまま）
         pherWater(S, F);
         if (F.active) for (const g of S.ghosts) if (g.mode === 'board' && F.cells.some(a => cheb(a, cellOf(g.px, g.py)) <= 1)) { g.stuckUntil = S.t + 0.1; g.stomp = S.t + 0.15; }
-        if ((F.el || 0) >= P.pherWindow) {
-          F.state = 'fade'; F.fadeT = S.t; F.active = false; emit(S, { type: 'pherEnd' }); log(S, 'フェロモンの効果が切れた', 'info');
+        // 修正：完全になってから pherMaxLife（60秒）たったら、温度に関係なく必ず切れる
+        if ((F.el || 0) >= P.pherWindow || S.t - F.t0 >= P.pherMaxLife) {
+          pherFade(S, F); log(S, 'フェロモンの効果が切れた', 'info');
           if (F.beta !== undefined) {                                    // まだらのガスだったマスは、Pベータ成分の塗られた場所になる
             S.pbetaId = ((S.pbetaId || 0) % 250) + 1;
             for (const c of F.cells) S.pbeta[c] = S.pbetaId;
@@ -3656,9 +3687,9 @@ const Sim = (() => {
     function pherDir(S, g, opts, nb) {
       const F = S.pher, here = g.y * N + g.x;
       // うろうろ：範囲（とそのまわり1マス）の中で動き回る。近くを検体Pが通ったら1度だけ、1割で興味がそれる
-      if (S.pher && S.pher.active && g.pherStay) g.pherStay = Math.max(g.pherStay, S.t + 1);   // 活性化中は効果が切れない
+      if (F && F.state === 'full' && F.active && g.pherStay) g.pherStay = Math.max(g.pherStay, S.t + 1);   // 活性化中は効果が切れない（修正：fade になったら延長しない）
       if (g.pherStay && S.t < g.pherStay && g.pherCells) {
-        if (cheb(cellOf(S.pac.px, S.pac.py), here) <= 3 && !(S.pher && S.pher.active)) {   // 活性化中は絶対に離れない
+        if (cheb(cellOf(S.pac.px, S.pac.py), here) <= 3 && !(F && F.state === 'full' && F.active)) {   // 活性化中は絶対に離れない（fade になったら離れられる）
           if (g.pherLoyal === undefined) g.pherLoyal = rnd(S) < 0.9;
           if (!g.pherLoyal) { g.pherStay = 0; return -1; }
         } else g.pherLoyal = undefined;

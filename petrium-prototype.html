@@ -259,6 +259,19 @@
   #rotBar #btnFree[aria-pressed=true] .led { background: #4ee3a0; box-shadow: 0 0 8px #4ee3a0; }
   #rotBar #btnHomeSave2.saved { color: #12a19a; }
   #btnHome { position: fixed; z-index: 20; right: 320px; bottom: 140px; }
+  /* フェロモンの検証（検証版だけ） */
+  #pvTags { position: fixed; inset: 0; pointer-events: none; z-index: 30; }
+  #pvTags .pvTag { position: absolute; left: 0; top: 0; padding: 2px 7px; border-radius: 8px; font-size: 10.5px; font-weight: 700; line-height: 1.35; white-space: nowrap; color: #fff; background: rgba(31,46,54,.82); text-align: center; }
+  #pvTags .pvTag.held { background: rgba(214,104,20,.92); }
+  #pvTags .pvTag.bound { background: rgba(180,80,160,.9); }
+  #pvTags .pvTag.free { background: rgba(31,46,54,.6); }
+  #pvTags .pvTag.pac { background: rgba(40,120,200,.92); }
+  .pvInfo { width: 100%; border-collapse: collapse; font-size: 11.5px; margin: 4px 0 8px; }
+  .pvInfo th { text-align: left; white-space: nowrap; padding: 3px 8px 3px 0; color: #5b6b73; font-weight: 700; vertical-align: top; }
+  .pvInfo td { padding: 3px 0; border-bottom: 1px solid rgba(31,46,54,.08); }
+  .pvH { margin: 10px 0 4px; font-size: 11px; font-weight: 800; color: #5b6b73; }
+  .pvChk { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; margin: 2px 0 4px; }
+  .grid.three { grid-template-columns: repeat(3, 1fr); } .grid.four { grid-template-columns: repeat(4, 1fr); }
   /* 公開版：検証パネルとムービーの入口を出さない */
   body.public #debug, body.public #btnDebug, body.public #moviePlayer, body.public #dbgStatus { display: none !important; }
   /* ---------- チュートリアルムービー：幕間の再生画面 ---------- */
@@ -1019,7 +1032,32 @@
   <header><h2>検証パネル</h2><button class="xbtn" id="dbgToggle">たたむ</button></header>
   <div class="body">
     <details open>
-      <summary>チュートリアルムービー <span class="new">新</span></summary>
+      <summary>フェロモンと足止めの検証 <span class="new">新</span></summary>
+      <label class="pvChk"><input type="checkbox" id="pvOn" checked> ペトリの上に検証用の表示を出す（一時的な壁のマス・ハンターと検体Pの状態）</label>
+      <label class="pvChk"><input type="checkbox" id="pvPlan" checked> フェロモンへ向かう途中のハンターが避けている、検体Pの予定の道を線で出す</label>
+      <table class="pvInfo" id="pvInfo"></table>
+      <p class="pvH">場面を作る</p>
+      <div class="grid">
+        <button data-act="pvGoal">ゴールへの道に足止めを作る</button><button data-act="pvGoal0">ビットを全部消して、ゴールへの道に足止め</button>
+        <button data-act="pvFood">遠いビットへの道に足止めを作る</button><button data-act="pvHere">検体Pの位置にフェロモンを付ける</button>
+        <button data-act="pvAll">今のフェロモンに、全員を足止めする</button><button data-act="pvHot">フェロモン＋30度で活性化</button>
+      </div>
+      <p class="pvH">残り時間</p>
+      <div class="grid">
+        <button data-act="pvLeft3">残り3秒にする</button><button data-act="pvLeft15">残り15秒にする</button>
+      </div>
+      <p class="pvH">レベル（ペトリを作り直す）</p>
+      <div class="grid">
+        <button data-act="lv1">Lv.1</button><button data-act="lv2">Lv.2</button><button data-act="lv3">Lv.3</button><button data-act="lv4">Lv.4</button>
+      </div>
+      <p class="pvH">速さ</p>
+      <div class="grid four">
+        <button data-speed="0">停止</button><button data-speed="0.5">×0.5</button><button data-speed="1">×1</button><button data-speed="4">×4</button>
+      </div>
+      <p class="note">オレンジのマスが「一時的な壁」（足止め中のハンターの体のマスと動いている先、フェロモンの2マス）です。検体Pはここを通れません。<br>紫の線は、フェロモンへ向かう途中のハンターが避けている、検体Pの予定の道です（向かう途中のハンターがいるときだけ出ます）。<br>壁のせいで行けるビットがないときは、足止めから離れて待ちます。</p>
+    </details>
+    <details>
+      <summary>チュートリアルムービー</summary>
       <div class="grid">
         <button data-act="movieM01">M01 ビットとハンター</button>
       </div>
@@ -5267,6 +5305,61 @@ const Sim = (() => {
         g.x = g.tx = x; g.y = g.ty = y; g.px = x + 0.5; g.py = y + 0.5; g.prog = 0; g.moving = false; g.rev = false; g.route = [];
         emit(S, { type: 'relocate', idx: g.idx });
       },
+      // ---- フェロモンの検証（検証版だけ） ----
+      pherInfo(S) {                                                    // 画面に出す今の様子
+        const F = S.pher, p = S.pac, held = S.ghosts.filter(g => pherHeld(S, g));
+        const w = new Uint8Array(N * N), wall = [];
+        if (pherWallCells(S, w)) for (let c = 0; c < N * N; c++) if (w[c]) wall.push(c);   // 一時的な壁のマス
+        let hold = 0;                                                  // 足止めの残り（いちばん早く離れるハンター。活性化中は切れるまで延長され続ける）
+        if (held.length) hold = F.active ? pherLeft(S) : Math.min(pherLeft(S), ...held.map(g => g.pherStay - S.t));
+        return {
+          state: F ? F.state : 'なし', cells: F && F.cells ? F.cells.slice() : [], active: !!(F && F.active), el: F ? (F.el || 0) : 0,
+          left: F && F.state === 'full' ? pherLeft(S) : 0, life: F && F.state === 'full' && F.t0 !== undefined ? S.t - F.t0 : 0,
+          hold: Math.max(0, hold), wall,
+          ghosts: S.ghosts.map(g => ({ key: g.key, mode: g.mode, held: pherHeld(S, g), bound: pherBound(S, g), stay: g.pherStay ? Math.max(0, g.pherStay - S.t) : 0 })),
+          lv: p.thinkLv || 1, act: p.act, plan: (p.planCells || []).slice(), anyBound: S.ghosts.some(g => pherBound(S, g)),
+        };
+      },
+      pherHoldAt(S, c1, c2, keys) {
+        S.pher = { cells: [c1, c2], state: 'full', ts: S.t, t0: S.t, go: S.t, el: 0 };
+        for (const g of S.ghosts) { g.pherDone = false; g.pherStay = 0; g.pherCells = null; g.pherLoyal = undefined; }
+        emit(S, { type: 'pher', cells: S.pher.cells });
+        keys.forEach((k, i) => {
+          const c = i % 2 ? c2 : c1, g = S.ghosts.find(h => h.key === k); if (!g) return;
+          this.movieRelease(S, k, c % N, (c / N) | 0, 0, true);
+          g.pherDone = true; g.pherCells = [c1, c2]; g.pherStay = S.t + P.pherWindow + (k === 'pink' ? P.pherPinkStay : 0);
+          emit(S, { type: 'relocate', idx: g.idx });
+        });
+      },
+      // 検体Pから目的地（ゴール、またはいちばん遠いビット）への道の途中に足止めを作る
+      pherHoldOnPath(S, toGoal, keys) {
+        const p = S.pac, here = p.y * N + p.x;
+        let tgt = GOAL[1] * N + GOAL[0];
+        if (!toGoal) { distFrom(S, [here], RD, -1, 400); let best = -1; for (let c = 0; c < N * N; c++) if (hasFood(S, c) && RD[c] > 0 && (best < 0 || RD[c] > RD[best])) best = c; if (best >= 0) tgt = best; }
+        distFrom(S, [tgt], RD, -1, 400);
+        const path = []; let c = here;
+        for (let k = 0; k < N * N && c >= 0 && c !== tgt; k++) {
+          const x = c % N, y = (c / N) | 0; let nx = -1;
+          for (let d = 0; d < 4; d++) { if (!open(S, x, y, d)) continue; const n = (y + DIRS[d][1]) * N + x + DIRS[d][0]; if (RD[n] >= 0 && RD[n] < RD[c]) { nx = n; break; } }
+          c = nx; if (c >= 0) path.push(c);
+        }
+        if (path.length < 6) { log(S, '検証：目的地が近すぎて、道の途中に足止めを作れなかった', 'info'); return; }
+        const k = Math.max(3, Math.floor(path.length * 0.55));
+        this.pherHoldAt(S, path[k], path[k + 1], keys || ['red', 'pink']);
+        log(S, `検証：${toGoal ? 'ゴール' : 'いちばん遠いビット'}への道の途中に足止めを作った（検体Pから${k + 1}歩先）`, 'info');
+      },
+      pherHoldAll(S) {                                                 // 今のフェロモンに、盤の上のハンター全員を足止めする
+        const F = S.pher; if (!F || F.state !== 'full') { log(S, '検証：完全なフェロモンがありません', 'info'); return; }
+        const keys = S.ghosts.filter(g => g.mode === 'board').map(g => g.key);
+        const el = F.el || 0; this.pherHoldAt(S, F.cells[0], F.cells[1], keys); S.pher.el = el;
+        log(S, `検証：盤の上のハンター${keys.length}体をフェロモンで足止めした`, 'info');
+      },
+      pherLeftSet(S, sec) {                                            // 残り時間を sec 秒にする（足止め中のハンターもそろえる）
+        const F = S.pher; if (!F || F.state !== 'full') return;
+        F.el = Math.max(0, P.pherWindow - sec * (F.active ? P.pherHotRate : 1));
+        for (const g of S.ghosts) if (pherHeld(S, g)) g.pherStay = S.t + sec + (g.key === 'pink' ? P.pherPinkStay : 0);
+        log(S, `検証：フェロモンの残りを${sec}秒にした`, 'info');
+      },
       giveSponge(S) { S.spongeHave = 1; emit(S, { type: 'spongeGet' }); log(S, '検証：スポンジボールを手に入れた', 'info'); },
       spongeHere(S) { S.spongeHave = 1; const r = placeSpongeAuto(S); if (!r.ok) log(S, '検証：' + r.reason, 'info'); },
       miracleNear(S) {
@@ -9112,6 +9205,9 @@ if (typeof module !== 'undefined') module.exports = Sim;
     introDrop: () => startIntro('drop'), introSlide: () => startIntro('slide'), introDigital: () => startIntro('digital'), introGrow: () => startIntro('grow'),
     introPoly: () => startIntro('poly'), introPop: () => startIntro('pop'), count3: () => { if (!isMob()) startCount(3); },
     toTitle: () => { saveGame(); location.reload(); },
+    pvGoal: () => D.pherHoldOnPath(S, true), pvGoal0: () => { D.clearFood(S, 0); D.pherHoldOnPath(S, true); }, pvFood: () => D.pherHoldOnPath(S, false),
+    pvHere: () => { D.pherHere(S); }, pvHot: () => D.pherHot(S), pvAll: () => D.pherHoldAll(S),
+    pvLeft3: () => D.pherLeftSet(S, 3), pvLeft15: () => D.pherLeftSet(S, 15),
     lv1: () => D.newStage(S, 1), lv2: () => D.newStage(S, 2), lv3: () => D.newStage(S, 3), lv4: () => D.newStage(S, 4), lvRand: () => D.newStage(S, 0),
     grow: () => D.grow(S), luck: () => D.luckNext(S), pincer: () => D.pincer(S),
     hScatter: () => D.setHMode(S, 'scatter'), hChase: () => D.setHMode(S, 'chase'), elroy: () => D.elroyTest(S),
@@ -10025,8 +10121,66 @@ if (typeof module !== 'undefined') module.exports = Sim;
     const pulse = 0.85 + 0.15 * Math.sin(t * 2.2);
     goalGlowMat.opacity = cK * 0.85 * pulse; goalLight.intensity = cK * 2.4 * pulse;   // 開いたあと、ゆっくり脈打つ青い光
   }
+  /* ---------- フェロモンの検証用の表示（検証版だけ。公開版では出さない） ----------
+   * 一時的な壁のマスをオレンジのマスで、ハンターと検体Pの状態を頭の上の札で出す。
+   * フェロモンへ向かう途中のハンターがいるときは、そのハンターが避けている検体Pの予定の道を、薄い線で出す。検証パネルにも今の様子を一覧で出す。 */
+  const pvZone = new THREE.InstancedMesh(zapGeo, new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, opacity: 0.5, depthWrite: false }), N * N);
+  pvZone.count = 0; pvZone.renderOrder = 7; pvZone.frustumCulled = false; world.add(pvZone);
+  const pvPlanGeo = new THREE.BufferGeometry(); pvPlanGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array((N * N + 1) * 3), 3));
+  const pvPlanLine = new THREE.Line(pvPlanGeo, new THREE.LineBasicMaterial({ color: 0xb450a0, transparent: true, opacity: 0.45, depthWrite: false }));
+  pvPlanLine.renderOrder = 8; pvPlanLine.frustumCulled = false; pvPlanLine.visible = false; world.add(pvPlanLine);
+  const pvTags = (() => { const d = document.createElement('div'); d.id = 'pvTags'; document.body.appendChild(d); return d; })();
+  const pvTagEl = {};
+  const PV_GK = { red: '赤', pink: '桃', cyan: '水', orange: '橙' };
+  let pvT = 0;
+  function pvTag(key, cls, html, pos) {
+    let e = pvTagEl[key]; if (!e) { e = pvTagEl[key] = document.createElement('div'); e.className = 'pvTag'; pvTags.appendChild(e); }
+    if (!pos) { e.style.display = 'none'; return; }
+    e.style.display = ''; e.className = 'pvTag ' + cls; if (e._h !== html) { e.innerHTML = html; e._h = html; }
+    const [sx, sy] = worldToScreen(pos[0], pos[1], pos[2]); e.style.transform = `translate(${sx.toFixed(0)}px, ${sy.toFixed(0)}px) translate(-50%, -100%)`;
+  }
+  function updatePherVis() {
+    const on = !PUB && $('#pvOn') && $('#pvOn').checked && !B.classList.contains('title');
+    pvTags.style.display = on ? '' : 'none';
+    if (!on) { pvZone.count = 0; pvPlanLine.visible = false; return; }
+    const I = D.pherInfo(S);
+    let n = 0;
+    for (const c of I.wall) { tmpM.compose(tmpV.set(W(c % N + 0.5), 0.05, W(((c / N) | 0) + 0.5)), tmpQ.identity(), tmpS.set(0.94, 1, 0.94)); pvZone.setMatrixAt(n++, tmpM); }
+    pvZone.count = n; pvZone.instanceMatrix.needsUpdate = true;
+    // 予定の道の線（フェロモンへ向かう途中のハンターがいるときだけ）
+    const showPlan = $('#pvPlan') && $('#pvPlan').checked && I.anyBound && I.plan.length > 0;
+    pvPlanLine.visible = !!showPlan;
+    if (showPlan) {
+      const a = pvPlanGeo.attributes.position.array; let k = 0;
+      const pt = (x, y) => { a[k++] = W(x); a[k++] = 0.12; a[k++] = W(y); };
+      pt(S.pac.px, S.pac.py);
+      for (const c of I.plan) pt(c % N + 0.5, ((c / N) | 0) + 0.5);
+      pvPlanGeo.setDrawRange(0, 1 + I.plan.length); pvPlanGeo.attributes.position.needsUpdate = true;
+    }
+    // 頭の上の札
+    I.ghosts.forEach((g, i) => {
+      const v = ghostsV[i].group, vis = g.mode === 'board' && v.visible;
+      const txt = g.held ? `${PV_GK[g.key]}：足止め 残${g.stay.toFixed(1)}秒` : g.bound ? `${PV_GK[g.key]}：フェロモンへ向かう` : `${PV_GK[g.key]}：ふつう`;
+      pvTag('g' + i, g.held ? 'held' : g.bound ? 'bound' : 'free', txt, vis ? [v.position.x, v.position.y + 0.55, v.position.z] : null);
+    });
+    const pg = pacGroup;
+    pvTag('pac', 'pac', `検体P Lv.${I.lv}${I.act === 'pherWait' ? '<br>待っている' : ''}`, pg.visible && !S.pac.dying ? [pg.position.x, pg.position.y + 0.6, pg.position.z] : null);
+    // 検証パネルの一覧（1秒に4回）
+    if (realS() - pvT < 0.25) return; pvT = realS();
+    const box = $('#pvInfo'); if (!box || $('#debug').classList.contains('closed')) return;
+    const st = { full: '完全', forming: 'でき始め', fade: '切れた', 'なし': 'なし' }[I.state] || I.state;
+    const rows = [
+      ['フェロモン', `${st}${I.active ? '（活性化中）' : ''}${I.state === 'full' ? `／残り ${I.left.toFixed(1)}秒・付いてから ${I.life.toFixed(1)}秒` : ''}`],
+      ['足止めの残り', I.hold > 0 ? `${I.hold.toFixed(1)}秒（いちばん早く離れるハンター）` : '足止めなし'],
+      ['一時的な壁', I.wall.length ? `${I.wall.length}マス` : 'なし'],
+      ['ハンター', I.ghosts.filter(g => g.mode === 'board').map(g => `${PV_GK[g.key]}${g.held ? '＝足止め' : g.bound ? '＝向かう途中' : '＝ふつう'}`).join('　') || '盤の上にいない'],
+      ['検体P', `Lv.${I.lv}`],
+      ['今の様子', ACT_LABEL[I.act] || I.act || '―'],
+    ];
+    box.innerHTML = rows.map(r => `<tr><th>${r[0]}</th><td>${r[1]}</td></tr>`).join('');
+  }
   function updateFoodFx(t) {
-    updateSponge(); syncSpongeBtn();
+    updateSponge(); syncSpongeBtn(); updatePherVis();
     for (const [c, m] of powerMeshes) { const s = 1 + 0.14 * Math.sin(t * 3.2 + c); m.scale.set(s, s * 0.92, s); }
     if (S.superFood >= 0) {
       superMesh.visible = !S.superBurnt; burntSuper.visible = S.superBurnt; burntSuper.position.set(W(S.superFood % N + 0.5), 0.22, W(((S.superFood / N) | 0) + 0.5));

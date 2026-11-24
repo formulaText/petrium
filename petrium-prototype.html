@@ -1332,9 +1332,8 @@ const Sim = (() => {
     pherFormAt: 4, pherFullAt: 5.5, pherFootHalf: 6,   // フェロモンの足跡：でき始め・完全になる濃さ（隣り合う2マスの合計）・半分に薄れるまでの秒数
     gPher: true, pherDelay: 2, pherWindow: 20, pherArrive: 10, pherPinkStay: 6, pherHot: 28,   // フェロモン（効果20秒・着いたとみなす10秒以内・28度以上で活性化）
     pherHotRate: 1 / 3, pherMaxLife: 60,   // 活性化中は効果の時間がふだんの1/3の速さで進む・完全になってから60秒たったら温度に関係なく必ず切れる
-    pherPassMargin: 1.5, pherBackWander: [2, 4], pherPeekTime: [1, 1.5], pherPeekDist: [3, 4], pherBackDist: [2, 3],   // 足止めの横を通り抜ける：余裕の秒数・Lv.1〜3が引き返してうろうろする秒数・Lv.4〜5が様子を見る秒数と距離・Lv.1〜3が引き返す距離
-    pherZoneBase: 1.5, pherZoneRisk: 1.2, pherZoneGreed: 0.8, pherZoneWit: 0.6, pherZoneMin: -0.5, pherZoneMax: 2,   // 足止めの場所を通る1歩の重み＝基本−大胆さ×1.2−欲×0.8−（頭がよければ0.6）。−0.5〜2に収める
-    pherBodyWait: 2,   // 足止め中のハンターの体があるマスの重み（入れないので、どいてもらうのを待つ分）
+    pherBoundDetour: 4, pherBoundAvoidR: 2,   // フェロモンへ向かう途中のハンター：検体Pの予定の道とまわり2マスを避ける遠回りは、最短より4マス長いところまで
+    pherWaitDist: 4, pherWaitPause: 0.5,   // 行き先がないとき：足止めから4マス以上離れて待つ。うろうろの1歩ごとに止まる秒数（ゆっくり）
     gQuantum: true, quantumCost: 100, quantumBits: 25, quantumTime: 20, quantumMiss: 0.5, quantumCalm: 0.2, quantumRetry: 0.5,
     mqTime: 15, mqWipe: 0.1, mqTurn: 3.2,   // ミラクル量子モード（15秒・食べ尽くしたあと1割で回路が広がってすべて消える・曲がりやすさ）
     pbWet: 2, pbChance: 0.7,   // Pベータ（水とフェロモンが2秒重なると7割でまだらのガスに）   // 量子ビット（体内100粒で生み出す・代償25粒・効果20秒・置けなかった1粒ごとに0.5秒短く・ドジやパニックは2割に）
@@ -1689,43 +1688,15 @@ const Sim = (() => {
     }
 
     /* ---------- 経路探索 ---------- */
-    // 足止めの場所を通る1歩の重み（性格で変わる）。ZONE_W のときだけ、道のりを重み付きで求める（FW：重み付きの道のり、FD：その道の歩数）
-    let ZONE_W = false, LAST_PATH = null;
-    const ZONE_C = new Float32Array(N * N), FW = new Float32Array(N * N), FW2 = new Float32Array(N * N);
+    let LAST_PATH = null;                                              // 検体Pが最後に選んだ道（フェロモンへ向かうハンターが、検体Pの予定の道を避けるのに使う）
     let AVOID_FIRE = false, AVOID_SET = null;                       // AVOID_SET：検体Pが道を探すときに通らないマス（放電の直線など）                                         // 検体Pが炎を避けて道を探すか（Lv.2以上・パワー中以外）
     const Q = new Int32Array(N * N), PREV = new Int32Array(N * N), PD = new Int8Array(N * N), FD = new Int16Array(N * N);
     function trace(c) { const r = []; while (PREV[c] !== -1) { r.push(PD[c]); c = PREV[c]; } return r.reverse(); }
-    // 重み付きの道のり（足止めの場所の1歩に ZONE_C を足す）。isT があれば、いちばん近い目的地への道を返す。
-    // 1歩の重みは必ず正（1＋−0.5以上）なので、ふつうの最短経路の求め方（ダイクストラ法）でよい
-    const WH = new Int32Array(N * N * 4), WHw = new Float64Array(N * N * 4), WDN = new Uint8Array(N * N);
-    function wsearch(S, a, sx, sy, useTrue, avoid, isT) {
-      PREV.fill(-2); FD.fill(-1); FW.fill(1e9); WDN.fill(0);
-      const s = sy * N + sx; PREV[s] = -1; FD[s] = 0; FW[s] = 0;
-      let n0 = 0; const push = (c, w) => { let i = n0++; while (i > 0) { const pa = (i - 1) >> 1; if (WHw[pa] <= w) break; WH[i] = WH[pa]; WHw[i] = WHw[pa]; i = pa; } WH[i] = c; WHw[i] = w; };
-      const pop = () => { const c = WH[0], last = WH[--n0], lw = WHw[n0]; let i = 0; while (true) { let k = 2 * i + 1; if (k >= n0) break; if (k + 1 < n0 && WHw[k + 1] < WHw[k]) k++; if (WHw[k] >= lw) break; WH[i] = WH[k]; WHw[i] = WHw[k]; i = k; } WH[i] = last; WHw[i] = lw; return c; };
-      push(s, 0);
-      while (n0 > 0) {
-        const c = pop(); if (WDN[c]) continue; WDN[c] = 1;
-        const x = c % N, y = (c / N) | 0;
-        if (isT && c !== s && isT(x, y, c)) return trace(c);
-        if (avoid && c !== s && avoid(c)) continue;
-        for (let d = 0; d < 4; d++) {
-          if (!passable(S, a, cellEdge(x, y, d), useTrue)) continue;
-          const n = (y + DIRS[d][1]) * N + x + DIRS[d][0];
-          if (WDN[n] || (AVOID_FIRE && S.fireT[n] >= 0) || (AVOID_SET && AVOID_SET[n])) continue;
-          const w = FW[c] + 1 + ZONE_C[n];
-          if (w < FW[n] - 1e-9) { FW[n] = w; PREV[n] = c; PD[n] = d; FD[n] = FD[c] + 1; push(n, w); }
-        }
-      }
-      return isT ? null : undefined;
-    }
-    const fwOf = c => ZONE_W ? FW[c] : FD[c];                         // 目的地選びに使う道のり（足止めの場所の重み入り）
     let KNOWN_ONLY = false;                                            // 覚えている「通れる道」だけで探す（忘れた所を壁なしと思い込んで突っ込まないように）
     function passable(S, a, e, useTrue) { if (OUTER[e]) return false; if (useTrue || !a) return !S.wall[e]; const m = memGet(S, a, e); return KNOWN_ONLY ? m === 1 : m !== 2; }
     function bfs(S, a, sx, sy, isT, useTrue) {
       // まず覚えている道だけで探し、見つからなければ、忘れた所は通れるかもしれないと考えて探す（探検）
       if (a && !useTrue && !KNOWN_ONLY) { KNOWN_ONLY = true; const r = bfs(S, a, sx, sy, isT, false); KNOWN_ONLY = false; if (r) return r; }
-      if (ZONE_W) return wsearch(S, a, sx, sy, useTrue, null, isT);   // 足止め中：場所の重みを入れて道を選ぶ
       PREV.fill(-2);
       let h = 0, t = 0; const s = sy * N + sx; Q[t++] = s; PREV[s] = -1;
       while (h < t) {
@@ -1746,15 +1717,14 @@ const Sim = (() => {
       if (a && !useTrue && !KNOWN_ONLY) {
         // 覚えていない所も含めた道のりを先に求め、覚えている道で行ける所はそちらで上書きする（行けない所だけ、探検の道＋遠回り扱い）
         bfsMap0(S, a, sx, sy, false, avoid);
-        PREV2.set(PREV); PD2.set(PD); FD2.set(FD); if (ZONE_W) FW2.set(FW);
+        PREV2.set(PREV); PD2.set(PD); FD2.set(FD);
         KNOWN_ONLY = true; bfsMap0(S, a, sx, sy, false, avoid); KNOWN_ONLY = false;
-        for (let c = 0; c < N * N; c++) if (FD[c] < 0 && FD2[c] >= 0) { PREV[c] = PREV2[c]; PD[c] = PD2[c]; FD[c] = FD2[c] + 3; if (ZONE_W) FW[c] = FW2[c] + 3; }
+        for (let c = 0; c < N * N; c++) if (FD[c] < 0 && FD2[c] >= 0) { PREV[c] = PREV2[c]; PD[c] = PD2[c]; FD[c] = FD2[c] + 3; }
         return;
       }
       bfsMap0(S, a, sx, sy, useTrue, avoid);
     }
     function bfsMap0(S, a, sx, sy, useTrue, avoid) {
-      if (ZONE_W) { wsearch(S, a, sx, sy, useTrue, avoid, null); return; }   // 足止め中：場所の重みを入れる
       PREV.fill(-2); FD.fill(-1);
       let h = 0, t = 0; const s = sy * N + sx; Q[t++] = s; PREV[s] = -1; FD[s] = 0;
       while (h < t) {
@@ -2070,7 +2040,7 @@ const Sim = (() => {
       for (const g of S.ghosts) {
         if (g.mode !== 'board') continue;
         if (g.fright && !(power && powerLeft <= 1.6)) continue;
-        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは怖がらない。フェロモンへ向かうハンターは、その道の上だけ（hunterView）
+        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは一時的な壁なので、逃げる・避ける判断には使わない
         const c = cellOf(g.px, g.py), gx = c % N, gy = (c / N) | 0, man = Math.abs(gx - p.x) + Math.abs(gy - p.y);
         let seen;
         if (lv === 1) seen = Math.max(Math.abs(gx - p.x), Math.abs(gy - p.y)) <= 3;   // ビットは目の前しか見ないが、ハンターは3マス以内で気づく
@@ -2109,7 +2079,7 @@ const Sim = (() => {
       }
       return best;
     }
-    function firstStep(path, S, p) { LAST_PATH = path; return path && path.length && open(S, p.x, p.y, path[0]) ? path[0] : -1; }   // 選んだ道を覚えておく（足止めの場所を通るかの判断に使う）
+    function firstStep(path, S, p) { LAST_PATH = path; return path && path.length && open(S, p.x, p.y, path[0]) ? path[0] : -1; }   // 選んだ道を覚えておく（フェロモンへ向かうハンターが避ける「予定の道」）
     function huntDir(S, p, lv, powerLeft) {
       const fr = S.ghosts.filter(g => g.mode === 'board' && g.fright);
       if (!fr.length || lv === 1) return -1;
@@ -2196,14 +2166,14 @@ const Sim = (() => {
       bfsMap(S, p, p.x, p.y, false, avoidP);
       const isT = c => S.food[c] > 0 || (S.pw[c] > 0 && !avoidP);
       let bestD = Infinity;
-      for (let c = 0; c < N * N; c++) if (isT(c) && FD[c] > 0 && fwOf(c) < bestD) bestD = fwOf(c);   // 道のりは、足止めの場所の重み入り（足止めがなければ歩数のまま）
+      for (let c = 0; c < N * N; c++) if (isT(c) && FD[c] > 0 && FD[c] < bestD) bestD = FD[c];
       if (bestD === Infinity) {
         bfsMap(S, null, p.x, p.y, true);
-        for (let c = 0; c < N * N; c++) if (hasFood(S, c) && FD[c] > 0 && fwOf(c) < bestD) bestD = fwOf(c);
+        for (let c = 0; c < N * N; c++) if (hasFood(S, c) && FD[c] > 0 && FD[c] < bestD) bestD = FD[c];
         if (bestD === Infinity) return -1;
       }
       const score = c => {
-        let s = fwOf(c) - Math.min(4, S.food[c] - 1) * 0.6;
+        let s = FD[c] - Math.min(4, S.food[c] - 1) * 0.6;
         if (lv >= 3 && th.length) { const h = HD[c]; if (h >= 0 && h < 6) s += (6 - h) * (lv === 4 ? 1.5 : 2) * (1.2 - pr.risk) * (endgame ? 0.4 : 1); }
         if (lv >= 3) {
           const x = c % N, y = (c / N) | 0;
@@ -2216,11 +2186,11 @@ const Sim = (() => {
       const keepOk = t0 >= 0 && isT(t0) && FD[t0] > 0;
       let pick = -1;
       if (lv === 2) {
-        if (keepOk && fwOf(t0) <= bestD + 3) pick = t0;
+        if (keepOk && FD[t0] <= bestD + 3) pick = t0;
         else {
           const near = [];
-          for (let c = 0; c < N * N; c++) if (isT(c) && FD[c] > 0 && fwOf(c) <= bestD + 2) near.push(c);
-          near.sort((a, b) => fwOf(a) - fwOf(b) || a - b);
+          for (let c = 0; c < N * N; c++) if (isT(c) && FD[c] > 0 && FD[c] <= bestD + 2) near.push(c);
+          near.sort((a, b) => FD[a] - FD[b] || a - b);
           pick = near.length > 1 && rnd(S) < pr.route * 0.35 ? near[ri(S, Math.min(3, near.length))] : near[0];
         }
       } else {
@@ -2241,7 +2211,7 @@ const Sim = (() => {
       const g = GOAL[1] * N + GOAL[0], man = Math.abs(GOAL[0] - p.x) + Math.abs(GOAL[1] - p.y);
       const know = man <= 6 || lmStage(S, p, p.lm ? p.lm.goal : undefined) === 'exact';   // ゴールのまわり6マス以内なら、場所がわかる
       if (know) {
-        // 足止め中のハンターの横を通るかどうかは、pherPassPrep() でまとめて決める
+        // 足止め中のハンターとフェロモンのマスは、一時的な壁として道を探す（AVOID_SET に入っている）
         return firstStep(bfs(S, p, p.x, p.y, isG) || bfs(S, p, p.x, p.y, isG, true), S, p);
       }
       setAct(S, p, 'goalDir');
@@ -2283,8 +2253,7 @@ const Sim = (() => {
       for (const g of S.ghosts) {
         if (g.mode !== 'board') continue;
         if (g.fright && !(power && powerLeft <= 1.6)) continue;
-        const view = hunterView(S, p, lv, g);
-        if (!view) continue;                                           // 足止め中のハンターは危険として数えない
+        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは危険として数えない（一時的な壁）
         const c = cellOf(g.px, g.py), gx = c % N, gy = (c / N) | 0, man = Math.abs(gx - p.x) + Math.abs(gy - p.y);
         const seen = lv >= 4 || VIS[c] === visStamp || man <= 5;       // Lv.3：見通せる通路と近くの気配だけ
         if (!seen) continue;
@@ -2296,7 +2265,7 @@ const Sim = (() => {
         let k = vp / vg;
         if (lv >= 5 && gMode(S, g) === 'scatter' && S.hmodeLeft > 2.5 && !(g.idx === 0 && S.elroy)) k *= 1.6;   // Lv.5：縄張りへ帰る途中のハンターは来るのが遅いと読む
         const off = lv >= 4 && g.moving ? -(1 - g.prog) * 0 : 0;
-        for (let i = 0; i < N * N; i++) { const d = HDg[i]; if (d >= 0 && (view === 1 || view[i])) { const v = (d + off) * k; if (v < HT[i]) HT[i] = v; } }   // フェロモンへ向かうハンターは、その道の上だけ
+        for (let i = 0; i < N * N; i++) { const d = HDg[i]; if (d >= 0) { const v = (d + off) * k; if (v < HT[i]) HT[i] = v; } }
         list.push(g);
       }
       return list;
@@ -2321,7 +2290,7 @@ const Sim = (() => {
       for (const g of S.ghosts) {
         if (g.mode !== 'board') continue;
         if (g.fright && !(power && powerLeft <= 1.6)) continue;
-        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは先読みに入れない。フェロモンへ向かうハンターは、検体Pがその道の上にいるときだけ
+        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは先読みに入れない（一時的な壁）
         const c = cellOf(g.px, g.py), man = Math.abs(c % N - p.x) + Math.abs(((c / N) | 0) - p.y);
         if (!(lv >= 4 || VIS[c] === visStamp || man <= 5)) continue;
         const vg = (g.idx === 0 && S.elroy) ? (S.elroy === 2 ? P.elroy2Speed : P.elroy1Speed) : P.ghostSpeed;
@@ -2568,8 +2537,7 @@ const Sim = (() => {
         const savePower = !endgame && normalLeft > 0;
         let pick = -1, ps = -Infinity; const cand = [];
         for (let c = 0; c < N * N; c++) {
-          if (FD[c] <= 0) continue;
-          const f = fwOf(c);                                             // 道のり（足止めの場所の重み入り。足止めがなければ歩数のまま）
+          const f = FD[c]; if (f <= 0) continue;
           let val = S.food[c];
           if (S.pw[c] && !power) val += savePower ? 0 : 1;
           if (c === S.superFood && !S.superBurnt && !miracleOn(S) && !p.boostHeld) val += 2.5;
@@ -2746,9 +2714,10 @@ const Sim = (() => {
       { const bd = blastDir(S, S.pac); if (bd >= 0) return bd; if (bd === -2) return -1; }  // 爆発で吹き飛ばされている
       { const sd = slideDir(S, S.pac); if (sd >= 0) return sd; if (sd === -2) return -1; }     // 氷の上は滑る
       AVOID_FIRE = Math.min(4, S.prof.lv + (S.t < S.pac.growUntil ? 1 : 0)) >= 2 && !(S.t < S.powerUntil);
-      AVOID_SET = elecAvoid(S, S.pac); ZONE_W = false; LAST_PATH = null;
+      AVOID_SET = pherWalls(S, S.pac, elecAvoid(S, S.pac)); LAST_PATH = null;   // 足止め中のハンターとフェロモンのマスは、一時的な壁
       const d = elecSafe(S, S.pac, pacDecide0(S));
-      AVOID_FIRE = false; AVOID_SET = null; ZONE_W = false; ZONE_C.fill(0); LAST_PATH = null;
+      pherPlan(S, S.pac, d);                                           // 予定の道を残す（フェロモンへ向かうハンターが避ける）
+      AVOID_FIRE = false; AVOID_SET = null; LAST_PATH = null;
       return d;
     }
     function pacDecide0(S) {
@@ -2771,7 +2740,6 @@ const Sim = (() => {
       if (p.backPending) { p.backPending = false; const b = (p.dir + 2) & 3; if (open(S, p.x, p.y, b)) { setAct(S, p, 'oops'); return b; } }
 
       const power = S.t < S.powerUntil && !p.isBeta, powerLeft = S.powerUntil - S.t;   // Pベータはパワーの力を持たない
-      const ppOv = pherPassPrep(S, p, lv, opts, power);                 // 足止め中：体のあるマスは通れない・場所の重み・続いている演出（引き返す・様子を見る）
       if (p.boostHeld && boostUse(S, p, lvShown, power, powerLeft, opts)) return -1;
       const th = threatCells(S, p, lv, power, powerLeft);
       let near = Infinity;
@@ -2842,16 +2810,11 @@ const Sim = (() => {
       { const md = miracleWant(S, p, lvShown, crisis); if (md >= 0) return md; }
       // 量子ビットがペトリにあれば、そこへ向かう
       { const qd = quantumDir(S, p, crisis); if (qd >= 0) return qd; }
-      // 足止め中のハンター：続いている演出（引き返す・様子を見る）
-      if (ppOv !== undefined) return ppOv;
+      // 壁のせいで行けるビット（食べ終えたらゴール）が1つもないときだけ、足止めから離れて待つ
+      if (!crisis) { const wd = pherWaitDir(S, p, opts); if (wd !== undefined) return wd; }
       // 3〜4. 通常の判断（成長中は1段上のレベルで考える）
       LAST_PATH = null;
       let d = think(S, p, lv, opts, th, near, alertR, power, powerLeft);
-      { // 選んだ道が足止めの場所を通るなら：残り時間が足りなければ通らない道を選び直す。足りれば、1回ずつ演出を挟んでから通る
-        const pv = pherPassPost(S, p, lv, opts, d);
-        if (pv.rethink) { LAST_PATH = null; d = think(S, p, lv, opts, th, near, alertR, power, powerLeft); }
-        else if (pv.ov !== undefined) d = pv.ov;
-      }
       // 操作精度：角での曲がり損ね
       if (d >= 0 && fresh && near > 2 && pr.quality < 1 && d !== p.dir && d !== ((p.dir + 2) & 3)) {
         p.rolledAt = p.arriveN;
@@ -3722,15 +3685,12 @@ const Sim = (() => {
     }
     const cheb = (a, b) => Math.max(Math.abs(a % N - b % N), Math.abs(((a / N) | 0) - ((b / N) | 0)));
     const pherNear = (S, c, r) => !!(S.pher && S.pher.cells) && S.pher.cells.some(a => cheb(a, c) <= r);
-    /* ---------- フェロモンで足止めされたハンター ----------
-     * 足止め中のハンター（pherHeld）は、検体Pを捕まえない。検体Pも、足止めの間ずっと怖がらない（危険の計算すべてから外す）。
-     * 体のあるマス（と動いている先のマス）だけは通れない障害物。まわりのマスやフェロモンのマスは、ふつうの通路。
-     * 足止めの場所（フェロモンのまわり1マスと、足止め中のハンターのまわり1マス）を通る1歩は、性格で重みが変わる：
-     *   慎重な個体は少しの遠回りで済めば別の道を、貪欲・大胆・計算高い個体は、むしろその先を選びやすい（ほかのハンターが引きつけられている今が好機）。
-     * 選んだ道が足止めの場所を通るときは、足止めのたびに1回ずつ「怖がっているように見せる演出」を挟んでから通る
-     *   （Lv.1〜3：近づく→引き返してうろうろ、Lv.4〜5：近づく→様子を見る）。演出は見せ方だけで、判断の理由にはしない。
-     * 通り抜けにかかる時間＋余裕が足止めの残り時間より長ければ、その場所を通らない道を選ぶ（残り時間は、この判断のときだけ水面下で教える）。
-     * フェロモンへ向かう途中のハンターは、仕組みを分かっている検体P（pherAware）には「自分を狙っていない」と見え、その道の上だけを危険とみなす。 */
+    /* ---------- フェロモンで足止めされたハンター＝一時的な壁 ----------
+     * フェロモンが full の間、足止め中のハンター（pherHeld）の体のあるマス（と動いている先）と、フェロモンの2マスは「一時的に壁ができた」のと同じ。
+     * 検体Pはそこを通れないマスとして、ふつうに道を探す（目的地選びも含む）。壁の隣は、ふつうの通路。
+     * 足止め中のハンターは、検体Pが逃げる・避ける判断には使わず、検体Pを捕まえない。fade になったら壁は消え、ふつうのハンターに戻る。
+     * 壁のせいで行けるビット（食べ終えたらゴール）が1つもないときだけ、足止めから4マス以上離れて、ゆっくりうろうろして待つ。
+     * フェロモンへ向かう途中のハンター（pherBound）は、検体Pの予定の道とまわり2マスをなるべく避けて向かう（ふつうのハンターと同じく捕まえる）。 */
     function pherHeld(S, g) {                                          // 足止め中のハンター（fade のあとに残る桃は含めない）
       const F = S.pher;
       return !!F && F.state === 'full' && g.mode === 'board' && !g.fright && !!g.pherCells && g.pherStay > S.t;
@@ -3739,142 +3699,84 @@ const Sim = (() => {
       const F = S.pher;
       return !!F && F.state === 'full' && !!F.cells && P.gPher && g.mode === 'board' && !g.fright && !!g.ph && !g.pherDone && !pherHeld(S, g);
     }
-    const BAND = new Map(); let bandTick = -1;
-    function pherBand(S, g) {                                          // そのハンターのフェロモンまでの道と、その両隣1マス
-      if (bandTick !== S.tick) { BAND.clear(); bandTick = S.tick; }
-      let b = BAND.get(g.idx); if (b) return b;
-      const df = new Int16Array(N * N); distFrom(S, S.pher.cells, df, -1, 99);
-      b = new Uint8Array(N * N);
-      let c = cellOf(g.px, g.py);
-      const mark = c0 => { for (let cc = 0; cc < N * N; cc++) if (cheb(cc, c0) <= 1) b[cc] = 1; };
-      if (g.moving) mark(g.ty * N + g.tx);
-      for (let k = 0; k < N * N && c >= 0; k++) {
-        mark(c);
-        if (df[c] <= 0) break;
-        const x = c % N, y = (c / N) | 0; let nx = -1;
-        for (let d = 0; d < 4; d++) { if (!open(S, x, y, d)) continue; const n = (y + DIRS[d][1]) * N + x + DIRS[d][0]; if (df[n] >= 0 && df[n] < df[c]) { nx = n; break; } }
-        c = nx;
-      }
-      BAND.set(g.idx, b);
-      return b;
-    }
-    // 検体Pにとってのハンター：0＝危険でない（足止め中）、1＝ふつうの危険、マスの表＝そのマスの上だけ危険（フェロモンへ向かう途中）
-    function hunterView(S, p, lv, g) {
-      if (pherHeld(S, g)) return 0;
-      if (pherBound(S, g) && pherAware(S, p, lv)) return pherBand(S, g);
-      return 1;
-    }
-    function dangerNow(S, p, lv, g) { const v = hunterView(S, p, lv, g); return v === 1 || (!!v && !!v[p.y * N + p.x]); }   // いま検体Pのいる所で危険か
+    function dangerNow(S, p, lv, g) { return !pherHeld(S, g); }      // 検体Pが逃げる・避ける判断に使うハンターか（足止め中は使わない）
     function pherLeft(S) {                                             // フェロモンが切れるまでの秒数（活性化中は進み方が遅い・最長の上限も考える）
       const F = S.pher, rate = F.active ? P.pherHotRate : 1;
       return Math.max(0, Math.min(Math.max(0, P.pherWindow - (F.el || 0)) / rate, F.t0 + P.pherMaxLife - S.t));
     }
-    function holdLeft(S, held) {                                       // 足止めの残り時間：いちばん早く離れるハンターに合わせる
-      const f = pherLeft(S), act = S.pher.active;
-      let m = f;
-      for (const g of held) m = Math.min(m, act ? f : g.pherStay - S.t);   // 活性化中は切れるまで延長され続ける
-      return m;
+    const PWALL = new Uint8Array(N * N), PWA = new Uint8Array(N * N), PWD = new Int16Array(N * N), PWQ = new Int32Array(N * N);
+    let PWALL_ON = false;
+    // 一時的な壁のマスを作り直し、ふだんの「通らないマス」（avoid）に足したものを返す
+    function pherWallCells(S, out) {
+      out.fill(0);
+      const F = S.pher;
+      if (!F || F.state !== 'full' || !F.cells || !P.gPher) return false;
+      const held = S.ghosts.filter(g => pherHeld(S, g));
+      if (!held.length) return false;
+      for (const g of held) { out[cellOf(g.px, g.py)] = 1; if (g.moving) out[g.ty * N + g.tx] = 1; }
+      for (const c of F.cells) out[c] = 1;
+      return true;
     }
-    const zoneCost = pr => clampI(P.pherZoneBase - P.pherZoneRisk * (pr.risk || 0) - P.pherZoneGreed * (pr.greed || 0) - ((pr.wit || 0) >= 0.7 ? P.pherZoneWit : 0), P.pherZoneMin, P.pherZoneMax);
-    const PPH = new Int16Array(N * N), PPZ = new Uint8Array(N * N), PPA = new Uint8Array(N * N), PPBODY = new Uint8Array(N * N);
-    let PP_HELD = null;
-    const ppRand = (S, r) => r[0] + rnd(S) * (r[1] - r[0]);
-    // 足止めの場所（PPZ）から離れる向き（演出の「引き返す」）。minD マスより近ければ離れ、離れていればそのあたりをうろうろ
-    function pherAwayStep(S, p, opts, minD) {
-      const zs = []; for (let c = 0; c < N * N; c++) if (PPZ[c]) zs.push(c);
-      distFrom(S, zs, PPH, -1, 40);
-      const here = p.y * N + p.x, h0 = PPH[here] < 0 ? 40 : PPH[here], rev = (p.dir + 2) & 3;
+    function pherWalls(S, p, avoid) {
+      PWALL_ON = pherWallCells(S, PWALL);
+      if (!PWALL_ON) return avoid;
+      if (avoid) PWA.set(avoid); else PWA.fill(0);
+      for (let c = 0; c < N * N; c++) if (PWALL[c]) PWA[c] = 1;
+      PWA[p.y * N + p.x] = 0;                                          // いま立っているマスからは出られる
+      return PWA;
+    }
+    // 本当の壁と、通らないマス（block）で数えた歩数
+    function pherDist(S, srcs, out, block) {
+      out.fill(-1);
+      let h = 0, t = 0;
+      for (const c of srcs) if (out[c] < 0) { out[c] = 0; PWQ[t++] = c; }
+      while (h < t) {
+        const c = PWQ[h++], x = c % N, y = (c / N) | 0;
+        for (let d = 0; d < 4; d++) {
+          if (!open(S, x, y, d)) continue;
+          const n = (y + DIRS[d][1]) * N + x + DIRS[d][0];
+          if (out[n] >= 0 || (block && block[n])) continue;
+          out[n] = out[c] + 1; PWQ[t++] = n;
+        }
+      }
+    }
+    // 行き先がないときの待ち方（なければ undefined）
+    function pherWaitDir(S, p, opts) {
+      if (!PWALL_ON) return undefined;
+      const here = p.y * N + p.x, goalC = GOAL[1] * N + GOAL[0];
+      const isT = c => S.foodLeft === 0 ? c === goalC : hasFood(S, c);
+      pherDist(S, [here], PWD, PWALL);
+      for (let c = 0; c < N * N; c++) if (PWD[c] > 0 && isT(c)) return undefined;   // 壁があっても行けるビットがある：ふつうの判断
+      pherDist(S, [here], PWD, null);
+      let any = false; for (let c = 0; c < N * N; c++) if (PWD[c] > 0 && isT(c)) { any = true; break; }
+      if (!any) return undefined;                                      // 壁がなくても行けない：壁のせいではない
+      // 足止めから pherWaitDist マス以上離れた所で、ゆっくりうろうろ。足止め中のハンターはフェロモンのまわり1マスを動き回るので、
+      // 「足止め」はその範囲（と壁のマス）から測る（いまの体の位置から測ると、1歩進む間にハンターのほうが近づいてくる）
+      const ws = []; for (let c = 0; c < N * N; c++) if (PWALL[c] || S.pher.cells.some(a => cheb(a, c) <= 1)) ws.push(c);
+      pherDist(S, ws, PWD, null);
+      const h0 = PWD[here] < 0 ? 99 : PWD[here], rev = (p.dir + 2) & 3;
       let best = -1, bs = -Infinity;
       for (const d of opts) {
-        const n = (p.y + DIRS[d][1]) * N + p.x + DIRS[d][0], h = PPH[n] < 0 ? 40 : PPH[n];
-        if (PPZ[n] && h0 >= 1) continue;
-        if (PPBODY[n] || (AVOID_SET && AVOID_SET[n])) continue;         // 足止め中のハンターの体には入らない
-        let sc = h0 < minD ? h * 3 : (h >= minD ? 4 : h - minD) + rnd(S) * 2;
-        if (d === rev && h0 >= minD) sc -= 1.5;
+        const n = (p.y + DIRS[d][1]) * N + p.x + DIRS[d][0];
+        if (AVOID_SET && AVOID_SET[n]) continue;
+        const h = PWD[n] < 0 ? 99 : PWD[n];
+        let sc = h0 < P.pherWaitDist ? h * 3 : (h >= P.pherWaitDist ? 4 : -10) + rnd(S) * 2 - (d === rev ? 1.5 : 0);
         if (sc > bs) { bs = sc; best = d; }
       }
+      setAct(S, p, 'pherWait');
+      if (best >= 0 && h0 >= P.pherWaitDist) p.pauseUntil = S.t + 1 / (P.base * P.pacSpeed) + P.pherWaitPause;   // ゆっくり：離れたあとは、1歩ごとに少し止まる
       return best;
     }
-    // 足止めされていない、怖いハンターが近くにいるか（そのときは演出をせず、ふだんの判断で逃げる）
-    function pherCalm(S, p, lv) {
-      const here = p.y * N + p.x, hs = S.ghosts.filter(g => g.mode === 'board' && !g.fright && dangerNow(S, p, lv, g)).map(g => cellOf(g.px, g.py));
-      if (!hs.length) return true;
-      distFrom(S, [here], PPH, -1, 4);
-      return !hs.some(c => PPH[c] >= 0 && PPH[c] <= 3);
-    }
-    // 毎回の判断の最初：体のあるマスを通れなくし、場所の重みを入れる。続いている演出（引き返す・様子を見る）があれば、その向きを返す
-    function pherPassPrep(S, p, lv, opts, power) {
-      ZONE_W = false; PP_HELD = null;
-      const F = S.pher;
-      const held = F && F.state === 'full' && P.gPher ? S.ghosts.filter(g => pherHeld(S, g)) : [];
-      PPBODY.fill(0);
-      if (!held.length) { p.pp = null; p.wantC = -1; return undefined; }
-      if (miracleOn(S) || p.isBeta || p.mq) return undefined;          // ミラクル中は触れたハンターが消えるので、障害物にもしない
-      // 足止め中のハンターの体（と動いている先）には入らない。道を探すときは「どいてもらうのを待つ」分の重みにして、
-      // 実際に次の1歩が体のマスなら、その場で待つ（pherPassPost）。体のマスを完全にふさぐと、細い通路の先へ一生行けなくなるため
-      for (const g of held) { PPBODY[cellOf(g.px, g.py)] = 1; if (g.moving) PPBODY[g.ty * N + g.tx] = 1; }
-      PPBODY[p.y * N + p.x] = 0;
-      if (quantumOn(S) || p.sup || power) return undefined;           // 量子ビット・ブースト・パワー中は、演出と重みは使わない
-      if (!p.pp || p.pp.id !== F.t0) p.pp = { id: F.t0, ph: 'none', backDone: false, peekDone: false };
-      const pp = p.pp;
-      // 足止めの場所と、性格による1歩の重み
-      PPZ.fill(0);
-      for (const g of held) { for (const a of g.pherCells) for (let c = 0; c < N * N; c++) if (cheb(a, c) <= 1) PPZ[c] = 1; const gc = cellOf(g.px, g.py); for (let c = 0; c < N * N; c++) if (cheb(gc, c) <= 1) PPZ[c] = 1; }
-      // 通ると決めたあと（近づく・演出・通り抜け）は、慎重さによる遠回りの重みをかけない（ハンターが動くたびに場所の形が変わり、道が入れ替わって迷わないように）
-      const zc = ['app', 'back', 'peek', 'brave'].includes(pp.ph) ? Math.min(0, zoneCost(S.prof)) : zoneCost(S.prof);
-      for (let c = 0; c < N * N; c++) ZONE_C[c] = (PPZ[c] ? zc : 0) + (PPBODY[c] ? P.pherBodyWait : 0);
-      ZONE_W = true; PP_HELD = held;
-      // 続いている演出
-      if (pp.ph === 'back') {
-        if (S.t >= pp.until) pp.ph = 'brave';
-        else if (pherCalm(S, p, lv)) { setAct(S, p, 'pherBack'); return pherAwayStep(S, p, opts, 4); }
-      }
-      if (pp.ph === 'peek') {
-        if (S.t >= pp.until) pp.ph = 'brave';
-        else if (pherCalm(S, p, lv)) { setAct(S, p, 'pherPeek'); if (rnd(S) < 0.04) p.dir = opts[ri(S, opts.length)]; return -1; }   // ときどき小さく向きを変える
-      }
-      return undefined;
-    }
-    // ふだんの判断のあと：選んだ道が足止めの場所を通るか見て、選び直し（rethink）か演出（ov）を決める
-    function pherPassPost(S, p, lv, opts, d) {
-      const pp = p.pp, held = PP_HELD;
-      if (d >= 0 && PPBODY[(p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]]) { p.wantC = (p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]; return { ov: -1 }; }   // 次の1歩に足止め中のハンターの体：入らずに、どいてもらうのを待つ
-      p.wantC = -1;
-      if (!pp || !held || !ZONE_W || d < 0) return {};
-      const here = p.y * N + p.x, inZ = !!PPZ[here];
+    // 検体Pの予定の道（いまの経路探索の結果）を残す
+    function pherPlan(S, p, d) {
       const cells = [];
-      if (LAST_PATH && LAST_PATH.length && LAST_PATH[0] === d) { let x = p.x, y = p.y; for (const k of LAST_PATH) { x += DIRS[k][0]; y += DIRS[k][1]; cells.push(y * N + x); } }
-      else cells.push((p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]);
-      let lastZ = -1; cells.forEach((c, i) => { if (PPZ[c]) lastZ = i; });
-      const route = /^(food|goal|goalDir|last|notice|clean|boost|wander|hunt|pherBrave)$/.test(p.act);   // 逃げている・パニックなどは対象外
-      if (!route || (!inZ && lastZ < 0)) { if (pp.ph === 'brave') pp.ph = 'done'; else if (pp.ph === 'app') pp.ph = 'none'; return {}; }
-      // 通り抜けにかかる時間と、足止めの残り時間（この判断のときだけ教える）
-      const steps = lastZ >= 0 ? lastZ + 1 : 1, v = P.base * P.pacSpeed;
-      const ok = steps / v + P.pherPassMargin < holdLeft(S, held);
-      if (!ok && !inZ) {                                               // 足りない：その場所を通らない道を選び直す（逃げるのではない）
-        if (AVOID_SET !== PPA) { if (AVOID_SET) PPA.set(AVOID_SET); else PPA.fill(0); }
-        for (let c = 0; c < N * N; c++) if (PPZ[c]) PPA[c] = 1;
-        PPA[here] = 0; AVOID_SET = PPA; ZONE_W = false;
-        if (pp.ph === 'brave' || pp.ph === 'app') pp.ph = 'none';
-        return { rethink: true };
+      if (d >= 0) {
+        if (LAST_PATH && LAST_PATH.length && LAST_PATH[0] === d) { let x = p.x, y = p.y; for (const k of LAST_PATH) { x += DIRS[k][0]; y += DIRS[k][1]; cells.push(y * N + x); } }
+        else cells.push((p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]);
       }
-      if (pp.ph === 'none' || pp.ph === 'done') {
-        if (lv <= 3 && !pp.backDone) { pp.ph = 'app'; pp.th = Math.round(ppRand(S, P.pherBackDist)); }
-        else if (lv >= 4 && !pp.peekDone) { pp.ph = 'app'; pp.th = Math.round(ppRand(S, P.pherPeekDist)); }
-        else { pp.ph = 'brave'; log(S, '検体Pが足止めされたハンターの横を通っていく', 'info'); }
-      }
-      if (pp.ph === 'app') {                                           // 近づく（ふだんの道のまま）。決めた距離まで来たら演出
-        distFrom(S, held.map(g => cellOf(g.px, g.py)), PPH, -1, 20);
-        const dh = PPH[here] < 0 ? 99 : PPH[here];
-        if (dh <= pp.th && pherCalm(S, p, lv)) {
-          if (lv <= 3) { pp.ph = 'back'; pp.backDone = true; pp.until = S.t + ppRand(S, P.pherBackWander); setAct(S, p, 'pherBack'); log(S, '検体Pが足止めされたハンターに近づいたが、こわくて引き返した', 'info'); return { ov: pherAwayStep(S, p, opts, 4) }; }
-          pp.ph = 'peek'; pp.peekDone = true; pp.until = S.t + ppRand(S, P.pherPeekTime); setAct(S, p, 'pherPeek'); return { ov: -1 };
-        }
-        return {};
-      }
-      if (pp.ph === 'brave') setAct(S, p, 'pherBrave');
-      return {};
+      p.planCells = cells;
     }
+    const PBA = new Uint8Array(N * N), PBD = new Int16Array(N * N);
     // フェロモンに引かれて動く向き（なければ -1）。苦手なギミックは気にしない
     function pherDir(S, g, opts, nb) {
       const F = S.pher, here = g.y * N + g.x;
@@ -3885,12 +3787,11 @@ const Sim = (() => {
           if (g.pherLoyal === undefined) g.pherLoyal = rnd(S) < 0.9;
           if (!g.pherLoyal) { g.pherStay = 0; return -1; }
         } else g.pherLoyal = undefined;
-        const pc = cellOf(S.pac.px, S.pac.py), pn = S.pac.moving ? S.pac.ty * N + S.pac.tx : -1;
+        const pc = cellOf(S.pac.px, S.pac.py);
         const held = F && F.state === 'full';
-        const pw = S.pac.wantC >= 0 ? S.pac.wantC : -1;
-        const near = opts.filter(d => g.pherCells.some(a => cheb(a, nb(d)) <= 1) && !(held && (nb(d) === pc || nb(d) === pn || nb(d) === pw)));   // 足止め中は、検体Pのいるマス・次に進むマス・入りたくて待っているマスへは動かない（道を空ける）
+        const near = opts.filter(d => g.pherCells.some(a => cheb(a, nb(d)) <= 1) && !(held && nb(d) === pc));   // 足止め中は、検体Pのいるマスへは動かない
         if (near.length) return near[ri(S, near.length)];
-        if (held) return -2;                                           // 動ける所がなければ、その場で待つ
+        if (held) return -2;                                           // 動ける所がなければ、その場にいる
       } else if (g.pherStay) { g.pherStay = 0; }
       if (!F || F.state !== 'full' || !P.gPher || S.t < F.go || g.pherDone || S.t > F.t0 + P.pherArrive + (F.pausedT || 0)) return -1;
       if (F.cells.includes(here)) {                                    // 着いた：効果が切れるまで（桃はさらに6秒）うろうろ
@@ -3902,10 +3803,18 @@ const Sim = (() => {
       // 最短の道。検体Pのいるマスは通らない（別の道を選ぶ）
       const pc = cellOf(S.pac.px, S.pac.py);
       const D = distFromSet(S, c => F.cells.includes(c), pc);
-      let best = -1, bd = 1e9;
       const rev = (g.dir + 2) & 3, cand = opts.filter(d => d !== rev).length ? opts.filter(d => d !== rev) : opts;
-      for (const d of PRI) { if (!cand.includes(d)) continue; const n = nb(d); if (n === pc) continue; const v = D[n]; if (v >= 0 && v < bd) { bd = v; best = d; } }
-      return best;
+      const pick = DD => { let best = -1, bd = 1e9; for (const d of PRI) { if (!cand.includes(d)) continue; const n = nb(d); if (n === pc) continue; const v = DD[n]; if (v >= 0 && v < bd) { bd = v; best = d; } } return [best, bd]; };
+      const [b0, d0] = pick(D);
+      // 検体Pの予定の道と、検体Pのまわり2マスをなるべく通らない道。最短より pherBoundDetour マス長いところまでなら、そちらで向かう
+      PBA.fill(0);
+      for (const c of (S.pac.planCells || [])) PBA[c] = 1;
+      for (let c = 0; c < N * N; c++) if (cheb(c, pc) <= P.pherBoundAvoidR) PBA[c] = 1;
+      for (const c of F.cells) PBA[c] = 0;
+      pherDist(S, F.cells, PBD, PBA);
+      const [b1, d1] = pick(PBD);
+      if (b1 >= 0 && b0 >= 0 && d1 <= d0 + P.pherBoundDetour) return b1;
+      return b0;
     }
 
     /* ---------- 爆発 ----------
@@ -4034,7 +3943,7 @@ const Sim = (() => {
       const x = c % N, y = (c / N) | 0, lv = p.thinkLv || 1;
       for (const g of S.ghosts) {
         if (g.mode !== 'board' || g.fright || g.bored) continue;
-        const view = hunterView(S, p, lv, g); if (!view || (view !== 1 && !view[c])) continue;   // 足止め中のハンター・フェロモンへ向かう途中のハンター（道の外）は気にしない
+        if (!dangerNow(S, p, lv, g)) continue;                         // 足止め中のハンターは気にしない（一時的な壁）
         const gc = cellOf(g.px, g.py);
         if (lv < 4 && VIS[gc] !== visStamp) continue;
         const gx = gc % N, gy = (gc / N) | 0;
@@ -4053,7 +3962,7 @@ const Sim = (() => {
       ELA.fill(0);
       let ice = iceMemo(S, p, ELA);
       { const sc = spongeCells(S); if (sc) { for (const c of sc) ELA[c] = 1; ice = true; } }   // スポンジボールは通れない
-      // （廃止）フェロモンとそのまわり1マスを避ける場所に入れていた。いまは足止めの横を通り抜けるかを pherPassPrep() で決める
+      // （廃止）フェロモンとそのまわり1マスを避ける場所に入れていた。いまは足止め中のハンターとフェロモンのマスだけを一時的な壁にする（pherWalls）
       const lvA = p.thinkLv || 1;
       if (P.aiOil && lvA >= 4 && !miracleOn(S) && !(S.t < S.powerUntil) && S.fireT.some(v => v >= 0)) for (let c = 0; c < N * N; c++) if (S.oil[c] && lmKnows(S, p, 4, c)) { ELA[c] = 1; ice = true; }   // 燃えやすい燃料の上は通らない（Lv.4〜）
       if (lvA >= 3 && P.gTemp && S.temp && S.temp.c >= 0 && S.temp.mode === 'heat') { ELA[S.temp.c] = 1; ice = true; }   // 加温中は温度のスイッチを踏まない（ハンターがだらけているので）
@@ -4064,7 +3973,7 @@ const Sim = (() => {
       return ice ? ELA : null;
     }
     function elecSafe(S, p, d) {
-      // （廃止）「フェロモンのそばにいれば、まず離れる」「フェロモンのまわりへは踏み込まない」。足止めの横を通るかは pherPassPrep() で決める
+      // （廃止）「フェロモンのそばにいれば、まず離れる」「フェロモンのまわりへは踏み込まない」。足止め中のハンターとフェロモンのマスだけを一時的な壁にする（pherWalls）
       // 氷を近道に使うとき（中高レベル・頭のいい個体）：滑った先にビットがあれば「今の様子」に出す
       if (d >= 0 && !(ELA[(p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]]) && S.ice && S.ice[(p.y + DIRS[d][1]) * N + p.x + DIRS[d][0]] && ((p.thinkLv || 1) >= 4 || (S.prof.wit || 0) >= 0.7)) {
         const end = iceSlideEnd(S, (p.y + DIRS[d][1]) * N + p.x + DIRS[d][0], d);
@@ -8994,7 +8903,7 @@ if (typeof module !== 'undefined') module.exports = Sim;
     oops: '曲がり損ねて引き返している', flee: 'ハンターから逃げている', hunt: '衰弱したハンターを追っている',
     mq: 'ミラクル量子モードで、壁を突き抜けて飛び回っている', mqLand: '培地に降り立った', dazed: 'ぼんやりとうろうろしている',
     qMake: '体内のビットで量子ビットを生み出している', quantum: '量子ビットへ向かっている', backdoor: 'バックドアで抜け出している',
-    miracle: 'ミラクルビットへ向かっている', elecRun: '放電の直線から逃げている', pherBack: '近づいたけど、こわくて引き返した', pherPeek: '足止めされたハンターの様子を見ている', pherBrave: '勇気を出して、ハンターの横を通り抜ける', iceAvoid: '覚えている氷を避けている', miracleEat: 'すべての道を思い出し、ビットを食べ尽くそうとしている',
+    miracle: 'ミラクルビットへ向かっている', elecRun: '放電の直線から逃げている', pherWait: 'ハンターが道をふさいでいるので、待っている', iceAvoid: '覚えている氷を避けている', miracleEat: 'すべての道を思い出し、ビットを食べ尽くそうとしている',
     lure: 'パワービットのそばでハンターを引き付けている', emerg: 'パワービットへ駆け込む', boost: 'ブーストビットを狙っている',
     trap: 'わざと往復して、フェロモンの罠を仕掛けている', goalDir: 'ゴールの青い光を頼りに進んでいる', iceRide: '氷を近道に使って滑っていく', tempPush: '温度のスイッチを押しに行く',
     food: 'ビットを回収中', clean: '焦げを落としたビットを食べに戻る', last: '残りわずか。ゴールのため回収を急いでいる', wander: 'うろうろ探索中', notice: '残りのビットに気づいて向かっている', goal: 'ゴールへ向かっている',
